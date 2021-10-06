@@ -161,12 +161,14 @@ import static io.prestosql.sql.QueryUtil.simpleQuery;
 import static io.prestosql.sql.QueryUtil.singleValueQuery;
 import static io.prestosql.sql.QueryUtil.table;
 import static io.prestosql.sql.SqlFormatter.formatSql;
+import static io.prestosql.sql.analyzer.SemanticErrorCode.CATALOG_NOT_FOUND;
 import static io.prestosql.sql.analyzer.SemanticErrorCode.CATALOG_NOT_SPECIFIED;
 import static io.prestosql.sql.analyzer.SemanticErrorCode.MISSING_CACHE;
 import static io.prestosql.sql.analyzer.SemanticErrorCode.MISSING_CATALOG;
 import static io.prestosql.sql.analyzer.SemanticErrorCode.MISSING_SCHEMA;
 import static io.prestosql.sql.analyzer.SemanticErrorCode.MISSING_TABLE;
 import static io.prestosql.sql.analyzer.SemanticErrorCode.NOT_SUPPORTED;
+import static io.prestosql.sql.analyzer.SemanticErrorCode.SCHEMA_NOT_FOUND;
 import static io.prestosql.sql.analyzer.SemanticErrorCode.VIEW_PARSE_ERROR;
 import static io.prestosql.sql.tree.BooleanLiteral.FALSE_LITERAL;
 import static io.prestosql.sql.tree.BooleanLiteral.TRUE_LITERAL;
@@ -517,6 +519,12 @@ final class ShowQueriesRewrite
         {
             QualifiedObjectName tableName = createQualifiedObjectName(session, showColumns, showColumns.getTable());
 
+            if (!metadata.getCatalogHandle(session, tableName.getCatalogName()).isPresent()) {
+                throw new SemanticException(CATALOG_NOT_FOUND, showColumns, "Catalog '%s' does not exist", tableName.getCatalogName());
+            }
+            if (!metadata.schemaExists(session, new CatalogSchemaName(tableName.getCatalogName(), tableName.getSchemaName()))) {
+                throw new SemanticException(SCHEMA_NOT_FOUND, showColumns, "Schema '%s' does not exist", tableName.getSchemaName());
+            }
             if (!metadata.getView(session, tableName).isPresent() &&
                     !metadata.getTableHandle(session, tableName).isPresent()) {
                 throw new SemanticException(MISSING_TABLE, showColumns, "Table '%s' does not exist", tableName);
