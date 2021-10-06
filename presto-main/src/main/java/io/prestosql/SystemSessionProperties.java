@@ -19,6 +19,7 @@ import io.airlift.units.Duration;
 import io.prestosql.execution.QueryManagerConfig;
 import io.prestosql.execution.TaskManagerConfig;
 import io.prestosql.memory.MemoryManagerConfig;
+import io.prestosql.memory.NodeMemoryConfig;
 import io.prestosql.snapshot.SnapshotConfig;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.session.PropertyMetadata;
@@ -168,12 +169,14 @@ public final class SystemSessionProperties
     public static final String SNAPSHOT_RETRY_TIMEOUT = "snapshot_retry_timeout";
     public static final String SKIP_ATTACHING_STATS_WITH_PLAN = "skip_attaching_stats_with_plan";
     public static final String SKIP_NON_APPLICABLE_RULES_ENABLED = "skip_non_applicable_rules_enabled";
+    public static final String QUERY_MAX_MEMORY_PER_NODE = "query_max_memory_per_node";
+    public static final String QUERY_MAX_TOTAL_MEMORY_PER_NODE = "query_max_total_memory_per_node";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
     public SystemSessionProperties()
     {
-        this(new QueryManagerConfig(), new TaskManagerConfig(), new MemoryManagerConfig(), new FeaturesConfig(), new HetuConfig(), new SnapshotConfig());
+        this(new QueryManagerConfig(), new TaskManagerConfig(), new MemoryManagerConfig(), new FeaturesConfig(), new HetuConfig(), new SnapshotConfig(), new NodeMemoryConfig());
     }
 
     @Inject
@@ -183,7 +186,8 @@ public final class SystemSessionProperties
             MemoryManagerConfig memoryManagerConfig,
             FeaturesConfig featuresConfig,
             HetuConfig hetuConfig,
-            SnapshotConfig snapshotConfig)
+            SnapshotConfig snapshotConfig,
+            NodeMemoryConfig nodeMemoryConfig)
     {
         sessionProperties = ImmutableList.of(
                 stringProperty(
@@ -780,7 +784,17 @@ public final class SystemSessionProperties
                         SKIP_NON_APPLICABLE_RULES_ENABLED,
                         "Whether to skip applying some selected rules based on query pattern",
                         featuresConfig.isSkipNonApplicableRulesEnabled(),
-                        false));
+                        false),
+                dataSizeProperty(
+                        QUERY_MAX_MEMORY_PER_NODE,
+                        "Maximum amount of memory a query can use per node",
+                        nodeMemoryConfig.getMaxQueryMemoryPerNode(),
+                        true),
+                dataSizeProperty(
+                        QUERY_MAX_TOTAL_MEMORY_PER_NODE,
+                        "Maximum amount of total memory a query can use per node",
+                        nodeMemoryConfig.getMaxQueryTotalMemoryPerNode(),
+                        true));
     }
 
     public List<PropertyMetadata<?>> getSessionProperties()
@@ -1372,5 +1386,15 @@ public final class SystemSessionProperties
     public static boolean isSkipNonApplicableRulesEnabled(Session session)
     {
         return session.getSystemProperty(SKIP_NON_APPLICABLE_RULES_ENABLED, Boolean.class);
+    }
+
+    public static DataSize getQueryMaxMemoryPerNode(Session session)
+    {
+        return session.getSystemProperty(QUERY_MAX_MEMORY_PER_NODE, DataSize.class);
+    }
+
+    public static DataSize getQueryMaxTotalMemoryPerNode(Session session)
+    {
+        return session.getSystemProperty(QUERY_MAX_TOTAL_MEMORY_PER_NODE, DataSize.class);
     }
 }

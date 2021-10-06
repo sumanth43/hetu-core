@@ -17,6 +17,7 @@ import io.prestosql.client.ClientCapabilities;
 import io.prestosql.execution.QueryManagerConfig;
 import io.prestosql.execution.TaskManagerConfig;
 import io.prestosql.memory.MemoryManagerConfig;
+import io.prestosql.memory.NodeMemoryConfig;
 import io.prestosql.metadata.SessionPropertyManager;
 import io.prestosql.snapshot.SnapshotConfig;
 import io.prestosql.sql.analyzer.FeaturesConfig;
@@ -60,7 +61,8 @@ public final class SessionTestUtils
                 new MemoryManagerConfig(),
                 new FeaturesConfig(),
                 new HetuConfig(),
-                snapshotConfig);
+                snapshotConfig,
+                new NodeMemoryConfig());
         TEST_SNAPSHOT_SESSION = testSessionBuilder(new SessionPropertyManager(properties))
                 .setCatalog("tpch")
                 .setSchema(TINY_SCHEMA_NAME)
