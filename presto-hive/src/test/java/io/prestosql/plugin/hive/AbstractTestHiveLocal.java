@@ -72,7 +72,7 @@ public abstract class AbstractTestHiveLocal
                 .setParquetTimeZone("America/Los_Angeles")
                 .setRcfileTimeZone("America/Los_Angeles");
 
-        setup(testDbName, hiveConfig, metastore);
+        setup(testDbName, hiveConfig, metastore, null);
     }
 
     @AfterClass(alwaysRun = true)

@@ -118,6 +118,7 @@ import org.testng.annotations.Test;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
@@ -133,6 +134,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 import java.util.stream.LongStream;
@@ -144,8 +146,7 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.collect.Iterables.concat;
-import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.collect.Iterables.*;
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Lists.reverse;
 import static com.google.common.collect.Maps.uniqueIndex;
@@ -257,6 +258,7 @@ import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.stream.Collectors.toList;
 import static org.apache.hadoop.hive.common.FileUtils.makePartName;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -580,6 +582,7 @@ public abstract class AbstractTestHive
     protected HiveMetadataFactory metadataFactory;
     protected HiveTransactionManager transactionManager;
     protected HiveMetastore metastoreClient;
+    protected ThriftHiveMetastore thriftMetastoreClient;
     protected ConnectorSplitManager splitManager;
     protected ConnectorPageSourceProvider pageSourceProvider;
     protected ConnectorPageSinkProvider pageSinkProvider;
@@ -706,7 +709,8 @@ public abstract class AbstractTestHive
     {
         HiveConfig hiveConfig = getHiveConfig()
                 .setParquetTimeZone(timeZone)
-                .setRcfileTimeZone(timeZone);
+                .setRcfileTimeZone(timeZone)
+                .setMetastoreTimeout(new Duration(300, MINUTES));
         String proxy = System.getProperty("hive.metastore.thrift.client.socks-proxy");
         if (proxy != null) {
             hiveConfig.setMetastoreSocksProxy(HostAndPort.fromString(proxy));
@@ -722,14 +726,17 @@ public abstract class AbstractTestHive
                 Duration.valueOf("15s"),
                 10000, false);
 
-        setup(databaseName, hiveConfig, metastore);
+        ThriftHiveMetastore thriftMetastore = new ThriftHiveMetastore(metastoreLocator, new ThriftHiveMetastoreConfig());
+
+        setup(databaseName, hiveConfig, metastore, thriftMetastore);
     }
 
-    protected final void setup(String databaseName, HiveConfig hiveConfig, HiveMetastore hiveMetastore)
+    protected final void setup(String databaseName, HiveConfig hiveConfig, HiveMetastore hiveMetastore, ThriftHiveMetastore thriftHiveMetastore)
     {
         setupHive(databaseName);
 
         metastoreClient = hiveMetastore;
+        thriftMetastoreClient = thriftHiveMetastore;
         HivePartitionManager partitionManager = new HivePartitionManager(TYPE_MANAGER, hiveConfig);
         HdfsConfiguration hdfsConfiguration = new HiveHdfsConfiguration(new HdfsConfigurationInitializer(hiveConfig), ImmutableSet.of());
         hdfsEnvironment = new HdfsEnvironment(hdfsConfiguration, hiveConfig, new NoHdfsAuthentication());
@@ -3028,6 +3035,100 @@ public abstract class AbstractTestHive
         }
     }
 
+    @Test
+    protected void testBenchmarkPartitions()
+            throws Exception
+    {
+        testBenchmarkInsert("table_35", 1_000);
+    }
+
+    protected void testBenchmarkInsert(String tableName, long partitionCount)
+            throws Exception
+    {
+        ThriftHiveMetastore hiveMetastoreClient = getThriftMetastoreClient();
+        HiveIdentity identity = new HiveIdentity(SESSION);
+        SchemaTableName schemaTableName = new SchemaTableName("default", tableName);
+        PartitionStatistics partitionStatistics =
+                new PartitionStatistics(
+                        new HiveBasicStatistics(OptionalLong.of(2), OptionalLong.of(10), OptionalLong.empty(), OptionalLong.empty()),
+                        ImmutableMap.<String, HiveColumnStatistics>builder()
+                                .put("t_integer", HiveColumnStatistics.createIntegerColumnStatistics(OptionalLong.of(2), OptionalLong.of(5), OptionalLong.of(0), OptionalLong.of(4)))
+                                .build());
+
+        List<ColumnMetadata> columns = ImmutableList.of(new ColumnMetadata("t_integer", INTEGER), new ColumnMetadata("ds", INTEGER));
+        doCreateEmptyTable(schemaTableName, ORC, columns);
+        List<String> partitionNames = new ArrayList<>();
+        AtomicLong partitionValue = new AtomicLong();
+        while(partitionValue.get() < partitionCount) {
+            List<String> partitionValues = ImmutableList.of(String.valueOf(partitionValue.getAndAdd(1)));
+            String partitionName = makePartName(ImmutableList.of("ds"), partitionValues);
+            partitionNames.add(partitionName);
+        }
+        float partitionsPerThread = partitionNames.size()/1;
+        String s = String.valueOf(partitionsPerThread);
+        Integer partitionsCountPerThread = Integer.parseInt(s.substring(0, s.indexOf("."))) + 1;
+        int startIndex = 0;
+        int endIndex;
+        List<Thread> threads = new ArrayList<>();
+        for (int threadPos = 0; threadPos < 1; threadPos++) {
+            endIndex = startIndex + partitionsCountPerThread.intValue();
+            if (endIndex > partitionCount) {
+                endIndex = Integer.parseInt(String.valueOf(partitionCount));
+            }
+            createThreadsForInsertingPartitions(startIndex, endIndex, threads, schemaTableName, partitionStatistics, partitionNames, hiveMetastoreClient, identity);
+            startIndex = endIndex;
+            if (startIndex > partitionCount) {
+                break;
+            }
+        }
+        for (Thread thread: threads) {
+            System.out.println("Threads Size: " + threads.size());
+            thread.run();
+        }
+
+        System.out.println("BenchMark Start for partitions: " + partitionNames.size());
+        long startTime = System.currentTimeMillis();
+        List<org.apache.hadoop.hive.metastore.api.Partition> partitions = hiveMetastoreClient.getPartitionsByNames(identity, "default", tableName, partitionNames);
+        System.out.println("Time taken for getPartitionByNames:" + (System.currentTimeMillis() - startTime) + "ms");
+
+        System.out.println("BenchMark Progress partition: " + partitions.size());
+        startTime = System.currentTimeMillis();
+        Map<String, PartitionStatistics> partitionStatisticsMap = hiveMetastoreClient.getPartitionStatistics(identity, hiveMetastoreClient.getTable(identity, "default", tableName).get(), partitions);
+        System.out.println("Time taken for getPartitionStatistics:" + (System.currentTimeMillis() - startTime) + "ms");
+
+        System.out.println("Number of Partitions: " + partitionStatisticsMap.size());
+
+    }
+    
+    private void createThreadsForInsertingPartitions(int startIndex, int endIndex, List<Thread> threadList, SchemaTableName schemaTableName, PartitionStatistics partitionStatistics, List<String> partitionNames, ThriftHiveMetastore hiveMetastoreClient, HiveIdentity identity)
+    {
+        Thread thread = new Thread(() -> {
+            List<String> partitionNamesPerThread = partitionNames.subList(startIndex, endIndex);
+            int perThreadStartIndex = 0;
+            int perThreadEndIndex = 1000;
+            while(perThreadStartIndex < partitionNamesPerThread.size()) {
+                System.out.println("startIndex: " + perThreadStartIndex + " endIndex: " + perThreadEndIndex + " size: " + partitionNamesPerThread.size());
+                testInsertPartitions(schemaTableName, partitionStatistics, partitionNamesPerThread.size() - perThreadStartIndex > 1000 ? partitionNamesPerThread.subList(perThreadStartIndex, perThreadEndIndex) : partitionNamesPerThread.subList(perThreadStartIndex, partitionNamesPerThread.size()), hiveMetastoreClient, identity);
+                perThreadEndIndex+=1000;
+                perThreadStartIndex+=1000;
+            }
+        });
+        threadList.add(thread);
+    }
+
+    protected void testInsertPartitions(SchemaTableName tableName, PartitionStatistics partitionStatistics, List<String> partitionNames, ThriftHiveMetastore hiveMetastoreClient, HiveIdentity identity)
+    {
+        Table table = getMetastoreClient().getTable(identity, tableName.getSchemaName(), tableName.getTableName())
+                .orElseThrow(() -> new TableNotFoundException(tableName));
+
+        List<PartitionWithStatistics> partitions = partitionNames
+                .stream()
+                .map(partitionName -> new PartitionWithStatistics(createDummyPartition(table, partitionName), partitionName, partitionStatistics))
+                .collect(toImmutableList());
+
+        hiveMetastoreClient.addPartitions(identity, tableName.getSchemaName(), tableName.getTableName(), partitions);
+    }
+
     protected Partition createDummyPartition(Table table, String partitionName)
     {
         return Partition.builder()
@@ -4488,6 +4589,11 @@ public abstract class AbstractTestHive
     protected HiveMetastore getMetastoreClient()
     {
         return metastoreClient;
+    }
+
+    protected ThriftHiveMetastore getThriftMetastoreClient()
+    {
+        return thriftMetastoreClient;
     }
 
     protected LocationService getLocationService()
