@@ -55,4 +55,10 @@ public class FileSystemExchangeSinkInstanceHandle
     {
         return outputPartitionCount;
     }
+
+    @JsonProperty
+    public int getPartiitonId()
+    {
+        return sinkHandle.getPartitionId();
+    }
 }

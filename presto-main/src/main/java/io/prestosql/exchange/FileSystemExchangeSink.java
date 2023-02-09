@@ -91,6 +91,7 @@ public class FileSystemExchangeSink
     private boolean closed;
     private final DirectSerialisationType directSerialisationType;
     private final int directSerialisationBufferSize;
+    private final int partitionId;
 
     public FileSystemExchangeSink(
             FileSystemExchangeStorage exchangeStorage,
@@ -105,7 +106,8 @@ public class FileSystemExchangeSink
             int exchangeSinkBuffersPerPartition,
             long maxFileSizeInBytes,
             DirectSerialisationType directSerialisationType,
-            int directSerialisationBufferSize)
+            int directSerialisationBufferSize,
+            int partitionId)
     {
         checkArgument(maxPageStorageSizeInBytes <= maxFileSizeInBytes,
                 format("maxPageStorageSizeInBytes %s exceeded maxFileSizeInBytes %s", succinctBytes(maxPageStorageSizeInBytes), succinctBytes(maxFileSizeInBytes)));
@@ -129,6 +131,7 @@ public class FileSystemExchangeSink
         else {
             this.bufferPool = null;
         }
+        this.partitionId = partitionId;
     }
 
     @Override
@@ -140,6 +143,36 @@ public class FileSystemExchangeSink
     public DirectSerialisationType getDirectSerialisationType()
     {
         return directSerialisationType;
+    }
+
+    @Override
+    public URI getOutputDirectory()
+    {
+        return outputDirectory;
+    }
+
+    @Override
+    public Optional<SecretKey> getSecretKey()
+    {
+        return secretKey;
+    }
+
+    @Override
+    public boolean isExchangeCompressionEnabled()
+    {
+        return exchangeCompressionEnabled;
+    }
+
+    @Override
+    public FileSystemExchangeStorage getExchangeStorage()
+    {
+        return exchangeStorage;
+    }
+
+    @Override
+    public int getPartitionId()
+    {
+        return partitionId;
     }
 
     @Override
@@ -428,7 +461,7 @@ public class FileSystemExchangeSink
                 currentBuffer.writeBytes(slice.getBytes(position, writableBytes));
                 position += writableBytes;
 
-                flushIfNeeded(false);
+                flushIfNeeded(true);
             }
         }
 

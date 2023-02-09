@@ -24,6 +24,7 @@ import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.hetu.core.transport.execution.buffer.SerializedPage;
 import io.prestosql.exchange.ExchangeSink;
 import io.prestosql.exchange.ExchangeSinkInstanceHandle;
+import io.prestosql.exchange.storage.FileSystemExchangeStorage;
 import io.prestosql.execution.StageId;
 import io.prestosql.execution.TaskId;
 import io.prestosql.memory.context.LocalMemoryContext;
@@ -31,6 +32,9 @@ import io.prestosql.spi.Page;
 import io.prestosql.spi.QueryId;
 import org.testng.annotations.Test;
 
+import javax.crypto.SecretKey;
+
+import java.net.URI;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -358,6 +362,36 @@ public class TestSpoolingExchangeOutputBuffer
             return abort;
         }
 
+        @Override
+        public FileSystemExchangeStorage getExchangeStorage()
+        {
+            return null;
+        }
+
+        @Override
+        public URI getOutputDirectory()
+        {
+            return null;
+        }
+
+        @Override
+        public Optional<SecretKey> getSecretKey()
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public boolean isExchangeCompressionEnabled()
+        {
+            return false;
+        }
+
+        @Override
+        public int getPartitionId()
+        {
+            return 0;
+        }
+
         public void setAbort(CompletableFuture<Void> abort)
         {
             this.abort = requireNonNull(abort, "abort is null");
@@ -370,7 +404,7 @@ public class TestSpoolingExchangeOutputBuffer
         INSTANCE
     }
 
-    private static class TestingLocalMemoryContext
+    protected static class TestingLocalMemoryContext
             implements LocalMemoryContext
     {
         @Override

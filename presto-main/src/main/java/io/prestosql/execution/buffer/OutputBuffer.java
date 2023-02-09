@@ -176,4 +176,31 @@ public interface OutputBuffer
     {
         return;
     }
+
+    default boolean isSpoolingDelegateAvailable()
+    {
+        return false;
+    }
+
+    default OutputBuffer getSpoolingDelegate()
+    {
+        return null;
+    }
+
+    default DirectSerialisationType getDelegateSpoolingExchangeDirectSerializationType()
+    {
+        return DirectSerialisationType.JAVA;
+    }
+
+    default void setSerde(PagesSerde pagesSerde)
+    {
+    }
+
+    default void setJavaSerde(PagesSerde pagesSerde)
+    {
+    }
+
+    default void setKryoSerde(PagesSerde pagesSerde)
+    {
+    }
 }

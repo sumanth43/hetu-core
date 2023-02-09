@@ -65,12 +65,19 @@ public class LazyOutputBuffer
     private OutputBuffer delegate;
 
     @GuardedBy("this")
+    private OutputBuffer hybridSpoolingDelegate;
+
+    @GuardedBy("this")
     private final Set<OutputBufferId> abortedBuffers = new HashSet<>();
 
     @GuardedBy("this")
     private final List<PendingRead> pendingReads = new ArrayList<>();
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private Optional<ExchangeSink> exchangeSink;
+
+    private PagesSerde serde;
+    private PagesSerde javaSerde;
+    private PagesSerde kryoSerde;
 
     public LazyOutputBuffer(
             TaskId taskId,
@@ -161,6 +168,7 @@ public class LazyOutputBuffer
         Set<OutputBufferId> abortedBuffersIds = ImmutableSet.of();
         List<PendingRead> bufferPendingReads = ImmutableList.of();
         OutputBuffer outputBuffer;
+        ExchangeManager exchangeManager = null;
         synchronized (this) {
             if (delegate == null) {
                 // ignore set output if buffer was already destroyed or failed
@@ -185,7 +193,7 @@ public class LazyOutputBuffer
                 if (newOutputBuffers.getExchangeSinkInstanceHandle().isPresent()) {
                     ExchangeSinkInstanceHandle exchangeSinkInstanceHandle = newOutputBuffers.getExchangeSinkInstanceHandle()
                             .orElseThrow(() -> new IllegalArgumentException("exchange sink handle is expected to be present for buffer type EXTERNAL"));
-                    ExchangeManager exchangeManager = exchangeManagerRegistry.getExchangeManager();
+                    exchangeManager = exchangeManagerRegistry.getExchangeManager();
                     ExchangeSink exchangeSinkInstance = exchangeManager.createSink(exchangeSinkInstanceHandle, false); //TODO: create directories
                     this.exchangeSink = Optional.ofNullable(exchangeSinkInstance);
                 }
@@ -199,11 +207,30 @@ public class LazyOutputBuffer
                 bufferPendingReads = ImmutableList.copyOf(this.pendingReads);
                 this.pendingReads.clear();
             }
-            this.exchangeSink.ifPresent(sink -> delegate = new SpoolingExchangeOutputBuffer(
-                    stateMachine,
-                    newOutputBuffers,
-                    sink,
-                    systemMemoryContextSupplier));
+            ExchangeManager finalExchangeManager = exchangeManager;
+            this.exchangeSink.ifPresent(sink -> {
+                if (delegate == null) {
+                    delegate = new SpoolingExchangeOutputBuffer(
+                            stateMachine,
+                            newOutputBuffers,
+                            sink,
+                            systemMemoryContextSupplier);
+                }
+                else {
+                    if (hybridSpoolingDelegate == null) {
+                        hybridSpoolingDelegate = new HybridSpoolingBuffer(stateMachine,
+                                newOutputBuffers,
+                                sink,
+                                systemMemoryContextSupplier,
+                                finalExchangeManager);
+                        if (hybridSpoolingDelegate != null) {
+                            hybridSpoolingDelegate.setSerde(serde);
+                            hybridSpoolingDelegate.setJavaSerde(javaSerde);
+                            hybridSpoolingDelegate.setKryoSerde(kryoSerde);
+                        }
+                    }
+                }
+            });
             outputBuffer = delegate;
         }
 
@@ -324,6 +351,9 @@ public class LazyOutputBuffer
         synchronized (this) {
             checkState(delegate != null, "Buffer has not been initialized");
             outputBuffer = delegate;
+        }
+        if (hybridSpoolingDelegate != null) {
+            hybridSpoolingDelegate.setNoMorePages();
         }
         outputBuffer.setNoMorePages();
     }
@@ -487,5 +517,45 @@ public class LazyOutputBuffer
             outputBuffer = delegate;
         }
         outputBuffer.enqueuePages(partition, pages, id, directSerde);
+    }
+
+    @Override
+    public boolean isSpoolingDelegateAvailable()
+    {
+        return delegate != null && hybridSpoolingDelegate != null && hybridSpoolingDelegate.isSpoolingOutputBuffer();
+    }
+
+    @Override
+    public OutputBuffer getSpoolingDelegate()
+    {
+        return hybridSpoolingDelegate;
+    }
+
+    @Override
+    public DirectSerialisationType getDelegateSpoolingExchangeDirectSerializationType()
+    {
+        DirectSerialisationType type = DirectSerialisationType.JAVA;
+        if (hybridSpoolingDelegate != null) {
+            type = hybridSpoolingDelegate.getExchangeDirectSerialisationType();
+        }
+        return type;
+    }
+
+    @Override
+    public void setSerde(PagesSerde serde)
+    {
+        this.serde = serde;
+    }
+
+    @Override
+    public void setJavaSerde(PagesSerde javaSerde)
+    {
+        this.javaSerde = javaSerde;
+    }
+
+    @Override
+    public void setKryoSerde(PagesSerde kryoSerde)
+    {
+        this.kryoSerde = kryoSerde;
     }
 }

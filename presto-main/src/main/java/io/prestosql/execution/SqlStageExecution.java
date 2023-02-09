@@ -550,7 +550,9 @@ public final class SqlStageExecution
 
             if (this.outputBuffers.compareAndSet(currentOutputBuffers, outputBuffers)) {
                 for (RemoteTask task : getAllTasks()) {
-                    task.setOutputBuffers(outputBuffers);
+                    OutputBuffers localOutputBuffers = new OutputBuffers(outputBuffers.getType(), outputBuffers.getVersion(),
+                            outputBuffers.isNoMoreBufferIds(), outputBuffers.getBuffers(), outputBuffers.getExchangeSinkInstanceHandle());
+                    task.setOutputBuffers(localOutputBuffers);
                 }
                 return;
             }
@@ -658,6 +660,8 @@ public final class SqlStageExecution
         });
 
         OutputBuffers localOutputBuffers = this.outputBuffers.get();
+        localOutputBuffers = new OutputBuffers(localOutputBuffers.getType(), localOutputBuffers.getVersion(),
+                localOutputBuffers.isNoMoreBufferIds(), localOutputBuffers.getBuffers(), localOutputBuffers.getExchangeSinkInstanceHandle());
         checkState(localOutputBuffers != null, "Initial output buffers must be set before a task can be scheduled");
 
         if (sinkExchange.isPresent()) {

@@ -210,4 +210,7 @@ public interface HetuFileSystemClient
 
     Stream<Path> getDirectoryStream(Path path, String prefix, String suffix)
             throws IOException;
+
+    void flush(OutputStream outputStream)
+            throws IOException;
 }

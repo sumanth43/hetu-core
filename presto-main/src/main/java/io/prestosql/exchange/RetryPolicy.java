@@ -19,6 +19,7 @@ public enum RetryPolicy
 {
     TASK(RetryMode.RETRIES_ENABLED),
     NONE(RetryMode.NO_RETRIES),
+    TASK_ASYNC(RetryMode.RETRIES_ENABLED),
     /**/;
 
     private final RetryMode retryMode;

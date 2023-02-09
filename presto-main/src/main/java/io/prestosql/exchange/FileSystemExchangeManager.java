@@ -137,7 +137,8 @@ public class FileSystemExchangeManager
                 exchangeSinkBuffersPerPartition,
                 exchangeSinkMaxFileSizeInBytes,
                 directSerialisationType,
-                directSerialisationBufferSize);
+                directSerialisationBufferSize,
+                instanceHandle.getPartiitonId());
     }
 
     @Override
@@ -157,7 +158,8 @@ public class FileSystemExchangeManager
                 exchangeSinkBuffersPerPartition,
                 exchangeSinkMaxFileSizeInBytes,
                 serType,
-                directSerialisationBufferSize);
+                directSerialisationBufferSize,
+                instanceHandle.getPartiitonId());
     }
 
     @Override

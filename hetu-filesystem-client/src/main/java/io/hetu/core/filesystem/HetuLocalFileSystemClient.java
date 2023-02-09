@@ -249,4 +249,11 @@ public class HetuLocalFileSystemClient
         String glob = prefix + "*" + suffix;
         return StreamSupport.stream(newDirectoryStream(path, glob).spliterator(), false);
     }
+
+    @Override
+    public void flush(OutputStream outputStream)
+            throws IOException
+    {
+        outputStream.flush();
+    }
 }

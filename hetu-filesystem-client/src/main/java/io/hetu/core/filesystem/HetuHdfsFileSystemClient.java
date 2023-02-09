@@ -18,6 +18,7 @@ import com.google.common.base.Throwables;
 import io.airlift.log.Logger;
 import io.prestosql.spi.filesystem.SupportedFileAttributes;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
@@ -264,6 +265,15 @@ public class HetuHdfsFileSystemClient
         }
         catch (FileNotFoundException e) {
             throw new NoSuchFileException(e.getMessage());
+        }
+    }
+
+    @Override
+    public void flush(OutputStream outputStream)
+            throws IOException
+    {
+        if (outputStream instanceof FSDataOutputStream) {
+            ((FSDataOutputStream) outputStream).hflush();
         }
     }
 

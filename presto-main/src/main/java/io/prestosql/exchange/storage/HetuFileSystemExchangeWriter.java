@@ -55,35 +55,39 @@ public class HetuFileSystemExchangeWriter
     private final OutputStream outputStream;
     private final DirectSerialisationType directSerialisationType;
     private final int directSerialisationBufferSize;
+    private final HetuFileSystemClient fileSystemClient;
+    private final OutputStream delegateOutputStream;
 
     public HetuFileSystemExchangeWriter(URI file, HetuFileSystemClient fileSystemClient, Optional<SecretKey> secretKey, boolean exchangeCompressionEnabled, AlgorithmParameterSpec algorithmParameterSpec, FileSystemExchangeConfig.DirectSerialisationType directSerialisationType, int directSerialisationBufferSize)
     {
         this.directSerialisationBufferSize = directSerialisationBufferSize;
         this.directSerialisationType = directSerialisationType;
+        this.fileSystemClient = fileSystemClient;
         try {
             Path path = Paths.get(file.toString());
+            this.delegateOutputStream = fileSystemClient.newOutputStream(path);
             if (secretKey.isPresent() && exchangeCompressionEnabled) {
                 Cipher cipher = Cipher.getInstance(CIPHER_TRANSFORMATION);
                 cipher.init(Cipher.ENCRYPT_MODE, secretKey.get(), algorithmParameterSpec);
-                this.outputStream = new SnappyFramedOutputStream(new CipherOutputStream(fileSystemClient.newOutputStream(path), cipher));
+                this.outputStream = new SnappyFramedOutputStream(new CipherOutputStream(delegateOutputStream, cipher));
             }
             else if (secretKey.isPresent()) {
                 Cipher cipher = Cipher.getInstance(CIPHER_TRANSFORMATION);
                 cipher.init(Cipher.ENCRYPT_MODE, secretKey.get(), algorithmParameterSpec);
-                this.outputStream = new CipherOutputStream(fileSystemClient.newOutputStream(path), cipher);
+                this.outputStream = new CipherOutputStream(delegateOutputStream, cipher);
             }
             else if (exchangeCompressionEnabled) {
-                this.outputStream = new SnappyFramedOutputStream(new OutputStreamSliceOutput(fileSystemClient.newOutputStream(path), directSerialisationBufferSize));
+                this.outputStream = new SnappyFramedOutputStream(new OutputStreamSliceOutput(delegateOutputStream, directSerialisationBufferSize));
             }
             else {
                 if (directSerialisationType == DirectSerialisationType.KRYO) {
-                    this.outputStream = new Output(fileSystemClient.newOutputStream(path), directSerialisationBufferSize);
+                    this.outputStream = new Output(delegateOutputStream, directSerialisationBufferSize);
                 }
                 else if (directSerialisationType == DirectSerialisationType.JAVA) {
-                    this.outputStream = new OutputStreamSliceOutput(fileSystemClient.newOutputStream(path), directSerialisationBufferSize);
+                    this.outputStream = new OutputStreamSliceOutput(delegateOutputStream, directSerialisationBufferSize);
                 }
                 else {
-                    this.outputStream = new OutputStreamSliceOutput(fileSystemClient.newOutputStream(path), directSerialisationBufferSize);
+                    this.outputStream = new OutputStreamSliceOutput(delegateOutputStream, directSerialisationBufferSize);
                 }
             }
         }
@@ -98,6 +102,8 @@ public class HetuFileSystemExchangeWriter
     {
         try {
             outputStream.write(slice.getBytes());
+            outputStream.flush();
+            fileSystemClient.flush(delegateOutputStream);
         }
         catch (IOException | RuntimeException e) {
             return immediateFailedFuture(e);
@@ -110,6 +116,13 @@ public class HetuFileSystemExchangeWriter
     {
         checkState(directSerialisationType != DirectSerialisationType.OFF, "Should be used with direct serialization is enabled!");
         serde.serialize(outputStream, page);
+        try {
+            outputStream.flush();
+            fileSystemClient.flush(delegateOutputStream);
+        }
+        catch (IOException | RuntimeException e) {
+            return immediateFailedFuture(e);
+        }
         return immediateFuture(null);
     }
 

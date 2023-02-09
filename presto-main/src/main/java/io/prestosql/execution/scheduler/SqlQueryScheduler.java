@@ -149,6 +149,7 @@ import static io.prestosql.SystemSessionProperties.getWriterMinSize;
 import static io.prestosql.SystemSessionProperties.isQueryResourceTrackingEnabled;
 import static io.prestosql.SystemSessionProperties.isReuseTableScanEnabled;
 import static io.prestosql.exchange.RetryPolicy.TASK;
+import static io.prestosql.exchange.RetryPolicy.TASK_ASYNC;
 import static io.prestosql.execution.BasicStageStats.aggregateBasicStageStats;
 import static io.prestosql.execution.QueryState.FINISHING;
 import static io.prestosql.execution.QueryState.RECOVERING;
@@ -633,7 +634,7 @@ public class SqlQueryScheduler
 
         StageId stageId = new StageId(queryStateMachine.getQueryId(), nextStageId.getAndIncrement());
         Optional<Exchange> exchange = Optional.empty();
-        if (retryPolicy.equals(TASK)) {
+        if (retryPolicy.equals(TASK) || retryPolicy.equals(TASK_ASYNC)) {
             ExchangeManager exchangeManager = exchangeManagerRegistry.getExchangeManager();
             exchange = createSqlStageExchange(exchangeManager, stageId);
         }

@@ -138,6 +138,7 @@ public class ExchangeClientFactory
                 buffer = new DeduplicatingDirectExchangeBuffer(scheduler, deduplicationBufferSize, retryPolicy, exchangeManagerRegistry, queryId, exchangeId);
                 break;
             case NONE:
+            case TASK_ASYNC:
                 buffer = null;
                 break;
             default:

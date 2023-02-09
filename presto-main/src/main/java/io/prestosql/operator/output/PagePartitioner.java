@@ -99,6 +99,9 @@ public class PagePartitioner
         this.outputBuffer = requireNonNull(outputBuffer, "outputBuffer is null");
         this.sourceTypes = requireNonNull(sourceTypes, "sourceTypes is null").toArray(new Type[0]);
         this.operatorContext = requireNonNull(operatorContext, "serde is null");
+        this.outputBuffer.setSerde(requireNonNull(operatorContext.getDriverContext().getSerde(), "serde is null"));
+        this.outputBuffer.setJavaSerde(requireNonNull(operatorContext.getDriverContext().getJavaSerde(), "java serde is null"));
+        this.outputBuffer.setKryoSerde(requireNonNull(operatorContext.getDriverContext().getKryoSerde(), "kryo serde is null"));
 
         int partitionCount = partitionFunction.getPartitionCount();
         int pageSize = min(DEFAULT_MAX_PAGE_SIZE_IN_BYTES, ((int) maxMemory.toBytes()) / partitionCount);
@@ -456,6 +459,7 @@ public class PagePartitioner
                 partitionPageBuilder.reset();
 
                 FileSystemExchangeConfig.DirectSerialisationType serialisationType = outputBuffer.getExchangeDirectSerialisationType();
+                FileSystemExchangeConfig.DirectSerialisationType spoolingSerialisationType = outputBuffer.getDelegateSpoolingExchangeDirectSerializationType();
                 if (outputBuffer.isSpoolingOutputBuffer() && serialisationType != FileSystemExchangeConfig.DirectSerialisationType.OFF) {
                     PagesSerde directSerde = (serialisationType == FileSystemExchangeConfig.DirectSerialisationType.JAVA) ? operatorContext.getDriverContext().getJavaSerde() : operatorContext.getDriverContext().getKryoSerde();
                     List<Page> pages = splitPage(pagePartition, DEFAULT_MAX_PAGE_SIZE_IN_BYTES);
@@ -466,6 +470,21 @@ public class PagePartitioner
                             .map(page -> operatorContext.getDriverContext().getSerde().serialize(page))
                             .collect(toImmutableList());
 
+                    if (outputBuffer.isSpoolingDelegateAvailable()) {
+                        OutputBuffer spoolingBuffer = outputBuffer.getSpoolingDelegate();
+                        if (spoolingSerialisationType != FileSystemExchangeConfig.DirectSerialisationType.OFF) {
+                            PagesSerde directSerde = (spoolingSerialisationType == FileSystemExchangeConfig.DirectSerialisationType.JAVA) ? operatorContext.getDriverContext().getJavaSerde() : operatorContext.getDriverContext().getKryoSerde();
+                            List<Page> pages = splitPage(pagePartition, DEFAULT_MAX_PAGE_SIZE_IN_BYTES);
+                            if (spoolingBuffer != null) {
+                                spoolingBuffer.enqueuePages(partition, pages, id, directSerde);
+                            }
+                        }
+                        else {
+                            if (spoolingBuffer != null) {
+                                spoolingBuffer.enqueue(partition, serializedPages, id);
+                            }
+                        }
+                    }
                     outputBuffer.enqueue(partition, serializedPages, id);
                 }
                 pagesAdded.incrementAndGet();

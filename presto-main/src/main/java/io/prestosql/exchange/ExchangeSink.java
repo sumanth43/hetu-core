@@ -16,8 +16,13 @@ package io.prestosql.exchange;
 import io.airlift.slice.Slice;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.prestosql.exchange.FileSystemExchangeConfig.DirectSerialisationType;
+import io.prestosql.exchange.storage.FileSystemExchangeStorage;
 import io.prestosql.spi.Page;
 
+import javax.crypto.SecretKey;
+
+import java.net.URI;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 public interface ExchangeSink
@@ -40,4 +45,14 @@ public interface ExchangeSink
     {
         return DirectSerialisationType.OFF;
     }
+
+    FileSystemExchangeStorage getExchangeStorage();
+
+    URI getOutputDirectory();
+
+    Optional<SecretKey> getSecretKey();
+
+    boolean isExchangeCompressionEnabled();
+
+    int getPartitionId();
 }

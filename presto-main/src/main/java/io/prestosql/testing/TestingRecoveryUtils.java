@@ -96,6 +96,12 @@ public class TestingRecoveryUtils
         }
 
         @Override
+        public void flush(OutputStream outputStream)
+                throws IOException
+        {
+        }
+
+        @Override
         public InputStream newInputStream(Path path)
         {
             return new InputStream()
