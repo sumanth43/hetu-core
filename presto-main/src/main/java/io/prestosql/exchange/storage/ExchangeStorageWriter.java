@@ -16,7 +16,10 @@ package io.prestosql.exchange.storage;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.slice.Slice;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
+import io.prestosql.execution.MarkerDataFileFactory;
 import io.prestosql.spi.Page;
+
+import java.net.URI;
 
 public interface ExchangeStorageWriter
 {
@@ -29,4 +32,8 @@ public interface ExchangeStorageWriter
     ListenableFuture<Void> abort();
 
     long getRetainedSize();
+
+    URI getFile();
+
+    void writeMarkerMetadata(MarkerDataFileFactory.MarkerDataFileFooterInfo markerDataFileFooterInfo);
 }

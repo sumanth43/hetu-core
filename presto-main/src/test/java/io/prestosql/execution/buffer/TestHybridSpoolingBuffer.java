@@ -15,6 +15,7 @@
 package io.prestosql.execution.buffer;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.hetu.core.filesystem.HetuLocalFileSystemClient;
@@ -32,13 +33,16 @@ import io.prestosql.exchange.FileSystemExchangeSinkInstanceHandle;
 import io.prestosql.exchange.FileSystemExchangeStats;
 import io.prestosql.exchange.storage.FileSystemExchangeStorage;
 import io.prestosql.exchange.storage.HetuFileSystemExchangeStorage;
+import io.prestosql.execution.MarkerDataFileFactory;
 import io.prestosql.execution.StageId;
 import io.prestosql.execution.TaskId;
 import io.prestosql.operator.PageAssertions;
+import io.prestosql.snapshot.SnapshotStateId;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.QueryId;
 import io.prestosql.spi.block.Block;
 import io.prestosql.spi.block.BlockBuilder;
+import io.prestosql.spi.filesystem.HetuFileSystemClient;
 import io.prestosql.testing.TestingPagesSerdeFactory;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -46,11 +50,13 @@ import org.testng.annotations.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
@@ -58,6 +64,7 @@ import java.util.stream.Collectors;
 
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
+import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static org.testng.Assert.assertEquals;
 
@@ -72,29 +79,28 @@ public class TestHybridSpoolingBuffer
     private ExchangeSink exchangeSink;
     private ExchangeManager exchangeManager;
     private ExchangeSinkInstanceHandle exchangeSinkInstanceHandle;
+    private final String baseURI = "file:///tmp/hetu/spooling";
     private final String baseDir = "/tmp/hetu/spooling";
     private final String accessDir = "/tmp/hetu";
     private final Path accessPath = Paths.get(accessDir);
+    private final HetuFileSystemClient hetuFileSystemClient = new HetuLocalFileSystemClient(new LocalConfig(new Properties()), accessPath);
 
     @BeforeMethod
     public void setUp()
             throws IOException, InterruptedException
     {
         Path basePath = Paths.get(baseDir);
-        File base = new File(baseDir);
-        if (!base.exists()) {
-            Files.createDirectories(basePath);
-        }
-        else {
+        File base = new File(accessDir);
+        if (base.exists()) {
             deleteDirectory(base);
-            Files.createDirectories(basePath);
         }
+        Files.createDirectories(basePath);
     }
 
     @AfterMethod
     public void cleanUp()
     {
-        File base = new File(baseDir);
+        File base = new File(accessDir);
         if (base.exists()) {
             deleteDirectory(base);
         }
@@ -108,7 +114,7 @@ public class TestHybridSpoolingBuffer
                 .setBaseDirectories(baseDir);
 
         FileSystemExchangeStorage exchangeStorage = new HetuFileSystemExchangeStorage();
-        exchangeStorage.setFileSystemClient(new HetuLocalFileSystemClient(new LocalConfig(new Properties()), accessPath));
+        exchangeStorage.setFileSystemClient(hetuFileSystemClient);
         exchangeManager = new FileSystemExchangeManager(exchangeStorage, new FileSystemExchangeStats(), config);
         exchangeSinkInstanceHandle = new FileSystemExchangeSinkInstanceHandle(
                 new FileSystemExchangeSinkHandle(0, Optional.empty(), false),
@@ -205,6 +211,79 @@ public class TestHybridSpoolingBuffer
             PageAssertions.assertPageEquals(ImmutableList.of(INTEGER, INTEGER), actualPages.get(pageCount), generatePage());
         }
         hybridSpoolingBuffer.setNoMorePages();
+    }
+
+    @Test
+    public void testHybridSpoolingMarkerIndexFile()
+    {
+        setConfig(FileSystemExchangeConfig.DirectSerialisationType.OFF);
+        HybridSpoolingBuffer hybridSpoolingBuffer = createHybridSpoolingBuffer();
+        URI markerDataFile = URI.create(baseURI).resolve("marker_data_file.data");
+        URI spoolingDataFile = URI.create(baseURI).resolve("spooling_data_file.data");
+        HybridSpoolingBuffer.SpoolingInfo spoolingInfo = new HybridSpoolingBuffer.SpoolingInfo(1000, 2000);
+        hybridSpoolingBuffer.enqueueMarkerIndex(1, markerDataFile, 1000, 2000, ImmutableMap.of(spoolingDataFile, spoolingInfo));
+    }
+
+    @Test
+    public void testHybridSpoolingMarkerDataFile()
+    {
+        SnapshotStateId snapshotStateId = new SnapshotStateId(1, new TaskId(new StageId("query", 1), 1, 1));
+        SnapshotStateId snapshotStateId1 = new SnapshotStateId(2, new TaskId(new StageId("query", 1), 1, 1));
+        setConfig(FileSystemExchangeConfig.DirectSerialisationType.OFF);
+        HybridSpoolingBuffer hybridSpoolingBuffer = createHybridSpoolingBuffer();
+        hybridSpoolingBuffer.enqueueMarkerData(1, ImmutableMap.of(snapshotStateId, "marker1"), exchangeSink.getSinkFiles());
+        hybridSpoolingBuffer.enqueueMarkerData(2, ImmutableMap.of(snapshotStateId1, "marker2"), exchangeSink.getSinkFiles());
+        MarkerDataFileFactory.MarkerDataFileFooter footer = (MarkerDataFileFactory.MarkerDataFileFooter) hybridSpoolingBuffer.getMarkerDataFileFooter();
+        Map<String, MarkerDataFileFactory.OperatorStateInfo> operatorStateInfoMap = footer.getOperatorStateInfo();
+        MarkerDataFileFactory.OperatorStateInfo operatorStateInfo = operatorStateInfoMap.get(snapshotStateId1.getId());
+        assertEquals(hybridSpoolingBuffer.getMarkerData(operatorStateInfo.getStateOffset()), "marker2");
+        MarkerDataFileFactory.MarkerDataFileFooter previousFooter = (MarkerDataFileFactory.MarkerDataFileFooter) hybridSpoolingBuffer.getMarkerDataFileFooter(footer.getPreviousTailOffset());
+        Map<String, MarkerDataFileFactory.OperatorStateInfo> previousOperatorStateInfoMap = previousFooter.getOperatorStateInfo();
+        MarkerDataFileFactory.OperatorStateInfo previousOperatorStateInfo = previousOperatorStateInfoMap.get(snapshotStateId.getId());
+        assertEquals(hybridSpoolingBuffer.getMarkerData(previousOperatorStateInfo.getStateOffset()), "marker1");
+    }
+
+    @Test
+    public void testMarkerSpoolingInfo()
+    {
+        int entries = 10;
+        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, entries);
+        for (int i = 0; i < entries; i++) {
+            BIGINT.writeLong(blockBuilder, i);
+        }
+        Block block = blockBuilder.build();
+        Page page = new Page(block);
+        SerializedPage serializedPage = javaSerde.serialize(page);
+        SnapshotStateId snapshotStateId = new SnapshotStateId(1, new TaskId(new StageId("query", 1), 1, 1));
+        SnapshotStateId snapshotStateId1 = new SnapshotStateId(1, new TaskId(new StageId("query", 1), 2, 1));
+        setConfig(FileSystemExchangeConfig.DirectSerialisationType.OFF);
+        HybridSpoolingBuffer hybridSpoolingBuffer = createHybridSpoolingBuffer();
+        hybridSpoolingBuffer.enqueue(0, ImmutableList.of(serializedPage), null);
+        hybridSpoolingBuffer.enqueueMarkerInfo(1, ImmutableMap.of(snapshotStateId, "marker1", snapshotStateId1, "marker2"));
+        assertEquals(hybridSpoolingBuffer.dequeueMarkerInfo(1), ImmutableMap.of(snapshotStateId, "marker1", snapshotStateId1, "marker2"));
+    }
+
+    @Test
+    public void testMarkerSpoolingInfoMultiPartition()
+    {
+        int entries = 10;
+        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, entries);
+        for (int i = 0; i < entries; i++) {
+            BIGINT.writeLong(blockBuilder, i);
+        }
+        Block block = blockBuilder.build();
+        Page page = new Page(block);
+        SerializedPage serializedPage = javaSerde.serialize(page);
+        SnapshotStateId snapshotStateId = new SnapshotStateId(1, new TaskId(new StageId("query", 1), 1, 1));
+        SnapshotStateId snapshotStateId1 = new SnapshotStateId(1, new TaskId(new StageId("query", 1), 2, 1));
+        setConfig(FileSystemExchangeConfig.DirectSerialisationType.OFF);
+        HybridSpoolingBuffer hybridSpoolingBuffer = createHybridSpoolingBuffer();
+        hybridSpoolingBuffer.enqueue(0, ImmutableList.of(serializedPage), null);
+        hybridSpoolingBuffer.enqueue(1, ImmutableList.of(serializedPage), null);
+        hybridSpoolingBuffer.enqueueMarkerInfo(1, ImmutableMap.of(snapshotStateId, "marker1"));
+        hybridSpoolingBuffer.enqueueMarkerInfo(2, ImmutableMap.of(snapshotStateId1, "marker2"));
+        assertEquals(hybridSpoolingBuffer.dequeueMarkerInfo(1), ImmutableMap.of(snapshotStateId, "marker1"));
+        assertEquals(hybridSpoolingBuffer.dequeueMarkerInfo(2), ImmutableMap.of(snapshotStateId1, "marker2"));
     }
 
     private HybridSpoolingBuffer createHybridSpoolingBuffer()

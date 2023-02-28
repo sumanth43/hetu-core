@@ -60,6 +60,12 @@ public class HetuFileSystemExchangeStorage
     }
 
     @Override
+    public HetuFileSystemClient getFileSystemClient()
+    {
+        return fileSystemClient;
+    }
+
+    @Override
     public void createDirectories(URI dir) throws IOException
     {
         fileSystemClient.createDirectories(Paths.get(dir.toString()));

@@ -22,6 +22,7 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
+import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
 import org.apache.hadoop.ipc.RemoteException;
 
@@ -36,6 +37,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.EnumSet;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -272,7 +274,8 @@ public class HetuHdfsFileSystemClient
     public void flush(OutputStream outputStream)
             throws IOException
     {
-        if (outputStream instanceof FSDataOutputStream) {
+        if (outputStream instanceof HdfsDataOutputStream) {
+            ((HdfsDataOutputStream) outputStream).hsync(EnumSet.of(HdfsDataOutputStream.SyncFlag.UPDATE_LENGTH));
             ((FSDataOutputStream) outputStream).hflush();
         }
     }

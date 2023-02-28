@@ -21,6 +21,8 @@ import io.airlift.slice.Slice;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.prestosql.exchange.FileSystemExchangeConfig;
 import io.prestosql.exchange.FileSystemExchangeConfig.DirectSerialisationType;
+import io.prestosql.execution.MarkerDataFileFactory;
+import io.prestosql.snapshot.RecoveryUtils;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.filesystem.HetuFileSystemClient;
@@ -57,12 +59,14 @@ public class HetuFileSystemExchangeWriter
     private final int directSerialisationBufferSize;
     private final HetuFileSystemClient fileSystemClient;
     private final OutputStream delegateOutputStream;
+    private final URI file;
 
     public HetuFileSystemExchangeWriter(URI file, HetuFileSystemClient fileSystemClient, Optional<SecretKey> secretKey, boolean exchangeCompressionEnabled, AlgorithmParameterSpec algorithmParameterSpec, FileSystemExchangeConfig.DirectSerialisationType directSerialisationType, int directSerialisationBufferSize)
     {
         this.directSerialisationBufferSize = directSerialisationBufferSize;
         this.directSerialisationType = directSerialisationType;
         this.fileSystemClient = fileSystemClient;
+        this.file = file;
         try {
             Path path = Paths.get(file.toString());
             this.delegateOutputStream = fileSystemClient.newOutputStream(path);
@@ -154,5 +158,24 @@ public class HetuFileSystemExchangeWriter
     public long getRetainedSize()
     {
         return INSTANCE_SIZE;
+    }
+
+    @Override
+    public URI getFile()
+    {
+        return file;
+    }
+
+    @Override
+    public void writeMarkerMetadata(MarkerDataFileFactory.MarkerDataFileFooterInfo markerDataFileFooterInfo)
+    {
+        try {
+            RecoveryUtils.serializeState(markerDataFileFooterInfo, outputStream, false);
+            outputStream.flush();
+            fileSystemClient.flush(delegateOutputStream);
+        }
+        catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }

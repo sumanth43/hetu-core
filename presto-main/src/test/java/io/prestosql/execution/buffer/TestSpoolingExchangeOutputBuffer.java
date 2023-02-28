@@ -25,6 +25,7 @@ import io.hetu.core.transport.execution.buffer.SerializedPage;
 import io.prestosql.exchange.ExchangeSink;
 import io.prestosql.exchange.ExchangeSinkInstanceHandle;
 import io.prestosql.exchange.storage.FileSystemExchangeStorage;
+import io.prestosql.execution.MarkerDataFileFactory;
 import io.prestosql.execution.StageId;
 import io.prestosql.execution.TaskId;
 import io.prestosql.memory.context.LocalMemoryContext;
@@ -35,6 +36,7 @@ import org.testng.annotations.Test;
 import javax.crypto.SecretKey;
 
 import java.net.URI;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -390,6 +392,18 @@ public class TestSpoolingExchangeOutputBuffer
         public int getPartitionId()
         {
             return 0;
+        }
+
+        @Override
+        public List<URI> getSinkFiles()
+        {
+            return ImmutableList.of();
+        }
+
+        @Override
+        public void enqueueMarkerInfo(MarkerDataFileFactory.MarkerDataFileFooterInfo markerDataFileFooterInfo)
+        {
+            return;
         }
 
         public void setAbort(CompletableFuture<Void> abort)

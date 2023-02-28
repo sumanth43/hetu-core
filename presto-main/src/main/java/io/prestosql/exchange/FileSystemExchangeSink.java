@@ -25,6 +25,7 @@ import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.prestosql.exchange.FileSystemExchangeConfig.DirectSerialisationType;
 import io.prestosql.exchange.storage.ExchangeStorageWriter;
 import io.prestosql.exchange.storage.FileSystemExchangeStorage;
+import io.prestosql.execution.MarkerDataFileFactory;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.util.SizeOf;
@@ -46,6 +47,7 @@ import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -173,6 +175,18 @@ public class FileSystemExchangeSink
     public int getPartitionId()
     {
         return partitionId;
+    }
+
+    @Override
+    public List<URI> getSinkFiles()
+    {
+        return writerMap.values().stream().flatMap(bufferedStorageWriter -> bufferedStorageWriter.getSpoolFiles().stream()).collect(Collectors.toList());
+    }
+
+    @Override
+    public void enqueueMarkerInfo(MarkerDataFileFactory.MarkerDataFileFooterInfo markerDataFileFooterInfo)
+    {
+        writerMap.values().stream().forEach(bufferedStorageWriter -> bufferedStorageWriter.enqueueMarkerMetadata(markerDataFileFooterInfo));
     }
 
     @Override
@@ -508,6 +522,16 @@ public class FileSystemExchangeSink
                 writeFuture.addListener(() -> bufferPool.offer(buffer), directExecutor());
                 addExceptionCallback(writeFuture, throwable -> failure.compareAndSet(null, throwable));
             }
+        }
+
+        public List<URI> getSpoolFiles()
+        {
+            return writers.stream().map(writer -> writer.getFile()).collect(Collectors.toList());
+        }
+
+        public void enqueueMarkerMetadata(MarkerDataFileFactory.MarkerDataFileFooterInfo markerDataFileFooterInfo)
+        {
+            writers.stream().forEach(exchangeStorageWriter -> exchangeStorageWriter.writeMarkerMetadata(markerDataFileFooterInfo));
         }
     }
 

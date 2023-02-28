@@ -32,6 +32,8 @@ public interface FileSystemExchangeStorage
 {
     public void setFileSystemClient(HetuFileSystemClient fsClient);
 
+    HetuFileSystemClient getFileSystemClient();
+
     void createDirectories(URI dir) throws IOException;
 
     ExchangeStorageReader createExchangeReader(Queue<ExchangeSourceFile> sourceFiles, int maxPageSize, DirectSerialisationType directSerialisationType, int directSerialisationBufferSize);

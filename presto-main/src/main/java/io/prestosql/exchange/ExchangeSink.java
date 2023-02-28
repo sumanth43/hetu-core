@@ -17,11 +17,13 @@ import io.airlift.slice.Slice;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.prestosql.exchange.FileSystemExchangeConfig.DirectSerialisationType;
 import io.prestosql.exchange.storage.FileSystemExchangeStorage;
+import io.prestosql.execution.MarkerDataFileFactory;
 import io.prestosql.spi.Page;
 
 import javax.crypto.SecretKey;
 
 import java.net.URI;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -55,4 +57,8 @@ public interface ExchangeSink
     boolean isExchangeCompressionEnabled();
 
     int getPartitionId();
+
+    List<URI> getSinkFiles();
+
+    void enqueueMarkerInfo(MarkerDataFileFactory.MarkerDataFileFooterInfo markerDataFileFooterInfo);
 }
