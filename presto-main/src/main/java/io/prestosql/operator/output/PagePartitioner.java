@@ -18,6 +18,7 @@ import io.airlift.units.DataSize;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.hetu.core.transport.execution.buffer.SerializedPage;
 import io.prestosql.exchange.FileSystemExchangeConfig;
+import io.prestosql.execution.buffer.BroadcastOutputBuffer;
 import io.prestosql.execution.buffer.OutputBuffer;
 import io.prestosql.operator.OperatorContext;
 import io.prestosql.operator.PartitionFunction;
@@ -45,6 +46,7 @@ import java.util.function.IntUnaryOperator;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.prestosql.SystemSessionProperties.isTaskAsyncParallelWriteEnabled;
 import static io.prestosql.execution.buffer.PageSplitterUtil.splitPage;
 import static io.prestosql.spi.block.PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
 import static java.lang.Math.max;
@@ -470,7 +472,7 @@ public class PagePartitioner
                             .map(page -> operatorContext.getDriverContext().getSerde().serialize(page))
                             .collect(toImmutableList());
 
-                    if (outputBuffer.isSpoolingDelegateAvailable()) {
+                    if (outputBuffer.isSpoolingDelegateAvailable() && (!isTaskAsyncParallelWriteEnabled(operatorContext.getDriverContext().getPipelineContext().getSession()) || outputBuffer.getDelegate() instanceof BroadcastOutputBuffer)) {
                         OutputBuffer spoolingBuffer = outputBuffer.getSpoolingDelegate();
                         if (spoolingSerialisationType != FileSystemExchangeConfig.DirectSerialisationType.OFF) {
                             PagesSerde directSerde = (spoolingSerialisationType == FileSystemExchangeConfig.DirectSerialisationType.JAVA) ? operatorContext.getDriverContext().getJavaSerde() : operatorContext.getDriverContext().getKryoSerde();

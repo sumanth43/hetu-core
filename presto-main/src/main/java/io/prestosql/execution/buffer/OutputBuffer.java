@@ -17,6 +17,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.hetu.core.transport.execution.buffer.SerializedPage;
+import io.prestosql.Session;
 import io.prestosql.exchange.FileSystemExchangeConfig.DirectSerialisationType;
 import io.prestosql.execution.StateMachine.StateChangeListener;
 import io.prestosql.execution.buffer.OutputBuffers.OutputBufferId;
@@ -187,6 +188,11 @@ public interface OutputBuffer
         return null;
     }
 
+    default OutputBuffer getDelegate()
+    {
+        return null;
+    }
+
     default DirectSerialisationType getDelegateSpoolingExchangeDirectSerializationType()
     {
         return DirectSerialisationType.JAVA;
@@ -203,4 +209,22 @@ public interface OutputBuffer
     default void setKryoSerde(PagesSerde pagesSerde)
     {
     }
+
+    default boolean checkIfAcknowledged(int bufferId, long token)
+    {
+        return true;
+    }
+
+    default long getTokenId(int bufferId, long token)
+    {
+        return -1;
+    }
+
+    default long getWriteToken(int partition)
+    {
+        return -1;
+    }
+
+    default void setSession(Session session)
+    {}
 }

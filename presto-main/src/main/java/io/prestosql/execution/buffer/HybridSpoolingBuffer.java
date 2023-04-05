@@ -17,8 +17,10 @@ package io.prestosql.execution.buffer;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
@@ -41,6 +43,7 @@ import io.prestosql.snapshot.SnapshotStateId;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.filesystem.HetuFileSystemClient;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 import javax.crypto.SecretKey;
 
@@ -53,19 +56,24 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
+import static com.google.common.util.concurrent.MoreExecutors.listeningDecorator;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.prestosql.exchange.FileSystemExchangeSink.DATA_FILE_SUFFIX;
 import static io.prestosql.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.prestosql.spi.filesystem.SupportedFileAttributes.SIZE;
 import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.concurrent.Executors.newFixedThreadPool;
 
 public class HybridSpoolingBuffer
         extends SpoolingExchangeOutputBuffer
@@ -96,6 +104,8 @@ public class HybridSpoolingBuffer
     private PagesSerde kryoSerde;
 
     private URI outputDirectory;
+    private Map<Integer, AtomicLong> writeTokenPerPartition = new HashMap<>();
+    private final ListeningExecutorService spoolingExecutorService;
 
     public HybridSpoolingBuffer(OutputBufferStateMachine stateMachine, OutputBuffers outputBuffers, ExchangeSink exchangeSink, Supplier<LocalMemoryContext> memoryContextSupplier, ExchangeManager exchangeManager)
     {
@@ -108,6 +118,52 @@ public class HybridSpoolingBuffer
         this.executor = newCachedThreadPool(daemonThreadsNamed("exchange-source-handles-creation-%s"));
         this.exchangeManager = exchangeManager;
         this.fsClient = exchangeSink.getExchangeStorage().getFileSystemClient();
+        this.spoolingExecutorService = listeningDecorator(newFixedThreadPool(1, daemonThreadsNamed("spooling-thread-s%")));
+    }
+
+    @Override
+    public void enqueue(List<SerializedPage> pages, String origin)
+    {
+        enqueue(0, pages, origin);
+    }
+
+    @Override
+    public void enqueue(int partition, List<SerializedPage> pages, String origin)
+    {
+        enqueueImpl(partition, pages, origin);
+    }
+
+    public long getWriteToken(int partition)
+    {
+        if (writeTokenPerPartition.containsKey(partition)) {
+            return writeTokenPerPartition.get(partition).get();
+        }
+        else {
+            return -1;
+        }
+    }
+
+    private void enqueueImpl(int partition, List<SerializedPage> localPages, String origin)
+    {
+        List<SerializedPage> spoolPages = new LinkedList<>(localPages);
+        ListenableFuture<?> future = spoolingExecutorService.submit(() -> super.enqueue(partition, spoolPages, origin));
+        Futures.addCallback(future, new FutureCallback<Object>() {
+
+            @Override
+            public void onSuccess(@Nullable Object result)
+            {
+                if (!writeTokenPerPartition.containsKey(partition)) {
+                    writeTokenPerPartition.put(partition, new AtomicLong());
+                }
+                writeTokenPerPartition.get(partition).getAndAdd(spoolPages.size());
+            }
+
+            @Override
+            public void onFailure(Throwable t)
+            {
+                throw new PrestoException(GENERIC_INTERNAL_ERROR, "spooling failed");
+            }
+        }, directExecutor());
     }
 
     public void enqueueMarkerInfo(int markerId, Map<SnapshotStateId, Object> states)

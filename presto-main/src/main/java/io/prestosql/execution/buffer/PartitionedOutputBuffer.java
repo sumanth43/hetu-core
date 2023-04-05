@@ -33,7 +33,9 @@ import io.prestosql.spi.snapshot.RestorableConfig;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
@@ -72,12 +74,27 @@ public class PartitionedOutputBuffer
     private final AtomicLong totalPagesAdded = new AtomicLong();
     private final AtomicLong totalRowsAdded = new AtomicLong();
 
+    private final boolean isTaskAsyncParallelWrite;
+    private Map<String, Long> partitionTokenMap = new HashMap<>();
+    private Map<Integer, AtomicLong> tokenPerPartition = new HashMap<>();
+
     public PartitionedOutputBuffer(
             OutputBufferStateMachine state,
             OutputBuffers outputBuffers,
             DataSize maxBufferSize,
             Supplier<LocalMemoryContext> systemMemoryContextSupplier,
             Executor notificationExecutor)
+    {
+        this(state, outputBuffers, maxBufferSize, systemMemoryContextSupplier, notificationExecutor, false);
+    }
+
+    public PartitionedOutputBuffer(
+            OutputBufferStateMachine state,
+            OutputBuffers outputBuffers,
+            DataSize maxBufferSize,
+            Supplier<LocalMemoryContext> systemMemoryContextSupplier,
+            Executor notificationExecutor,
+            boolean isTaskAsyncParallelWrite)
     {
         this.stateMachine = requireNonNull(state, "state is null");
         requireNonNull(outputBuffers, "outputBuffers is null");
@@ -94,8 +111,12 @@ public class PartitionedOutputBuffer
         for (OutputBufferId bufferId : outputBuffers.getBuffers().keySet()) {
             ClientBuffer partition = new ClientBuffer(bufferId);
             partitionsBuffer.add(partition);
+            if (isTaskAsyncParallelWrite) {
+                tokenPerPartition.put(bufferId.getId(), new AtomicLong());
+            }
         }
         this.partitions = partitionsBuffer.build();
+        this.isTaskAsyncParallelWrite = isTaskAsyncParallelWrite;
 
         state.compareAndSet(OPEN, NO_MORE_BUFFERS);
         state.compareAndSet(NO_MORE_PAGES, FLUSHING);
@@ -180,6 +201,21 @@ public class PartitionedOutputBuffer
     }
 
     @Override
+    public boolean checkIfAcknowledged(int bufferId, long token)
+    {
+        if (partitionTokenMap.containsKey(bufferId + "-" + token)) {
+            return false;
+        }
+        return true;
+    }
+
+    @Override
+    public long getTokenId(int bufferId, long token)
+    {
+        return partitionTokenMap.get(bufferId + "-" + token);
+    }
+
+    @Override
     public void enqueue(List<SerializedPage> pages, String origin)
     {
         checkState(partitions.size() == 1, "Expected exactly one partition");
@@ -245,6 +281,12 @@ public class PartitionedOutputBuffer
 
         // add pages to the buffer (this will increase the reference count by one)
         partitions.get(partitionNumber).enqueuePages(serializedPageReferences);
+        if (isTaskAsyncParallelWrite) {
+            if (!partitionTokenMap.containsKey(partitionNumber + "-" + tokenPerPartition.get(partitionNumber).get())) {
+                partitionTokenMap.put(partitionNumber + "-" + tokenPerPartition.get(partitionNumber).get(), tokenPerPartition.get(partitionNumber).get());
+            }
+            partitionTokenMap.put(partitionNumber + "-" + tokenPerPartition.get(partitionNumber), tokenPerPartition.get(partitionNumber).addAndGet(1));
+        }
 
         // drop the initial reference
         serializedPageReferences.forEach(SerializedPageReference::dereferencePage);
@@ -265,6 +307,9 @@ public class PartitionedOutputBuffer
         requireNonNull(outputBufferId, "bufferId is null");
 
         partitions.get(outputBufferId.getId()).acknowledgePages(sequenceId);
+        if (isTaskAsyncParallelWrite) {
+            partitionTokenMap.remove(outputBufferId.getId() + "-" + sequenceId);
+        }
     }
 
     @Override

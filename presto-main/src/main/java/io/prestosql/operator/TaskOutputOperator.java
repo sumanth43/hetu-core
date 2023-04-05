@@ -17,6 +17,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.hetu.core.transport.execution.buffer.SerializedPage;
 import io.prestosql.exchange.FileSystemExchangeConfig.DirectSerialisationType;
+import io.prestosql.execution.buffer.BroadcastOutputBuffer;
 import io.prestosql.execution.buffer.OutputBuffer;
 import io.prestosql.snapshot.SingleInputSnapshotState;
 import io.prestosql.spi.Page;
@@ -33,6 +34,7 @@ import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.prestosql.SystemSessionProperties.isTaskAsyncParallelWriteEnabled;
 import static io.prestosql.execution.buffer.PageSplitterUtil.splitPage;
 import static io.prestosql.spi.block.PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
 import static java.util.Objects.requireNonNull;
@@ -223,7 +225,7 @@ public class TaskOutputOperator
                 }
             }
             else {
-                if (outputBuffer.isSpoolingDelegateAvailable()) {
+                if (outputBuffer.isSpoolingDelegateAvailable() && (!isTaskAsyncParallelWriteEnabled(operatorContext.getDriverContext().getPipelineContext().getSession()) || outputBuffer.getDelegate() instanceof BroadcastOutputBuffer)) {
                     OutputBuffer spoolingBuffer = outputBuffer.getSpoolingDelegate();
                     if (spoolingSerialisationType != DirectSerialisationType.OFF) {
                         PagesSerde directSerde = (spoolingSerialisationType == DirectSerialisationType.JAVA) ? operatorContext.getDriverContext().getJavaSerde() : operatorContext.getDriverContext().getKryoSerde();

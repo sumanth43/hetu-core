@@ -421,6 +421,7 @@ public class SqlTask
             // The LazyOutput buffer does not support write methods, so the actual
             // output buffer must be established before drivers are created (e.g.
             // a VALUES query).
+            outputBuffer.setSession(session);
             outputBuffer.setOutputBuffers(outputBuffers);
 
             // assure the task execution is only created once

@@ -96,6 +96,7 @@ public class QueryManagerConfig
     private String exchangeFilesystemBaseDirectory = "/tmp/hetu-exchange-manager";
 
     private boolean queryResourceTracking;
+    private boolean taskAsyncParallelWriteEnabled;
 
     @Min(1)
     public int getScheduleSplitBatchSize()
@@ -610,6 +611,18 @@ public class QueryManagerConfig
     public QueryManagerConfig setQueryResourceTracking(Boolean queryResourceTracking)
     {
         this.queryResourceTracking = queryResourceTracking;
+        return this;
+    }
+
+    public boolean isTaskAsyncParallelWriteEnabled()
+    {
+        return taskAsyncParallelWriteEnabled;
+    }
+
+    @Config("task-async-parallel-write-enabled")
+    public QueryManagerConfig setTaskAsyncParallelWriteEnabled(Boolean taskAsyncParallelWriteEnabled)
+    {
+        this.taskAsyncParallelWriteEnabled = taskAsyncParallelWriteEnabled;
         return this;
     }
 }

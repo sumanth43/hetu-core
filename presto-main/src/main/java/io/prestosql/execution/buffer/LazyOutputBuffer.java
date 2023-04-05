@@ -21,11 +21,13 @@ import io.airlift.log.Logger;
 import io.airlift.units.DataSize;
 import io.hetu.core.transport.execution.buffer.PagesSerde;
 import io.hetu.core.transport.execution.buffer.SerializedPage;
+import io.prestosql.Session;
 import io.prestosql.exchange.ExchangeManager;
 import io.prestosql.exchange.ExchangeManagerRegistry;
 import io.prestosql.exchange.ExchangeSink;
 import io.prestosql.exchange.ExchangeSinkInstanceHandle;
 import io.prestosql.exchange.FileSystemExchangeConfig.DirectSerialisationType;
+import io.prestosql.exchange.RetryPolicy;
 import io.prestosql.execution.StateMachine.StateChangeListener;
 import io.prestosql.execution.TaskId;
 import io.prestosql.execution.buffer.OutputBuffers.OutputBufferId;
@@ -38,14 +40,20 @@ import javax.annotation.concurrent.GuardedBy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static io.prestosql.SystemSessionProperties.getRetryPolicy;
+import static io.prestosql.SystemSessionProperties.isTaskAsyncParallelWriteEnabled;
 import static io.prestosql.execution.buffer.BufferResult.emptyResults;
 import static io.prestosql.execution.buffer.BufferState.FAILED;
 import static io.prestosql.execution.buffer.BufferState.FINISHED;
@@ -72,8 +80,22 @@ public class LazyOutputBuffer
 
     @GuardedBy("this")
     private final List<PendingRead> pendingReads = new ArrayList<>();
+
+    @GuardedBy("this")
+    private Map<Integer, Long> partitionedTokenIds = new ConcurrentHashMap<>();
+
+    @GuardedBy("this")
+    private AtomicLong bufferSize = new AtomicLong();
+
+    @GuardedBy("this")
+    private Map<Integer, ConcurrentLinkedQueue<SerializedPage>> serializedPartitionedPages = new ConcurrentHashMap<>();
+
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private Optional<ExchangeSink> exchangeSink;
+
+    private long tokenRemoved = 0;
+    private boolean noMorePages;
+    private boolean isTaskAsyncParallelWriteEnabled;
 
     private PagesSerde serde;
     private PagesSerde javaSerde;
@@ -177,13 +199,14 @@ public class LazyOutputBuffer
                 }
                 switch (newOutputBuffers.getType()) {
                     case PARTITIONED:
-                        delegate = new PartitionedOutputBuffer(stateMachine, newOutputBuffers, maxBufferSize, systemMemoryContextSupplier, executor);
+                        delegate = new PartitionedOutputBuffer(stateMachine, newOutputBuffers, maxBufferSize, systemMemoryContextSupplier, executor, isTaskAsyncParallelWriteEnabled);
                         break;
                     case BROADCAST:
+                        isTaskAsyncParallelWriteEnabled = false;
                         delegate = new BroadcastOutputBuffer(stateMachine, maxBufferSize, systemMemoryContextSupplier, executor);
                         break;
                     case ARBITRARY:
-                        delegate = new ArbitraryOutputBuffer(stateMachine, maxBufferSize, systemMemoryContextSupplier, executor);
+                        delegate = new ArbitraryOutputBuffer(stateMachine, maxBufferSize, systemMemoryContextSupplier, executor, isTaskAsyncParallelWriteEnabled);
                         break;
                     default:
                         //TODO(Alex): decide the spool output buffer
@@ -259,6 +282,26 @@ public class LazyOutputBuffer
             }
             outputBuffer = delegate;
         }
+        if (noMorePages && isTaskAsyncParallelWriteEnabled && hybridSpoolingDelegate != null && delegate != null && !(delegate instanceof BroadcastOutputBuffer)) {
+            if (serializedPartitionedPages.containsKey(bufferId.getId()) && serializedPartitionedPages.get(bufferId.getId()).size() == 0) {
+                serializedPartitionedPages.remove(bufferId.getId());
+            }
+            if (serializedPartitionedPages.size() != 0) {
+                long tokenAcknowledged = hybridSpoolingDelegate.getWriteToken(bufferId.getId()) >= 0 ? hybridSpoolingDelegate.getWriteToken(bufferId.getId()) : tokenRemoved;
+                for (int count = 0; serializedPartitionedPages.containsKey(bufferId.getId()) && partitionedTokenIds.containsKey(bufferId.getId()) && count < (tokenAcknowledged - partitionedTokenIds.get(bufferId.getId())); count++) {
+                    SerializedPage serializedPage = serializedPartitionedPages.get(bufferId.getId()).poll();
+                    bufferSize.getAndAdd(-serializedPage.getSizeInBytes());
+                    if (serializedPartitionedPages.get(bufferId.getId()).size() == 0) {
+                        serializedPartitionedPages.remove(bufferId.getId());
+                    }
+                }
+                partitionedTokenIds.put(bufferId.getId(), tokenAcknowledged);
+            }
+            else {
+                hybridSpoolingDelegate.setNoMorePages();
+                outputBuffer.setNoMorePages();
+            }
+        }
         return outputBuffer.get(bufferId, token, maxSize);
     }
 
@@ -269,6 +312,69 @@ public class LazyOutputBuffer
         synchronized (this) {
             checkState(delegate != null, "delegate is null");
             outputBuffer = delegate;
+        }
+        if (hybridSpoolingDelegate != null && isTaskAsyncParallelWriteEnabled && delegate != null && !(delegate instanceof  BroadcastOutputBuffer)) {
+            boolean clientAcknowledged = outputBuffer.checkIfAcknowledged(bufferId.getId(), token);
+            if (outputBuffer instanceof ArbitraryOutputBuffer) {
+                if (!clientAcknowledged) {
+                    long tokenAcknowledged = Math.min(outputBuffer.getTokenId(bufferId.getId(), token), hybridSpoolingDelegate.getWriteToken(0));
+                    for (int count = 0; count < (tokenAcknowledged - tokenRemoved); count++) {
+                        SerializedPage serializedPage = serializedPartitionedPages.get(0).poll();
+                        bufferSize.getAndAdd(-serializedPage.getSizeInBytes());
+                    }
+                    tokenRemoved = tokenAcknowledged;
+                }
+                if (noMorePages) {
+                    if (serializedPartitionedPages.size() != 0) {
+                        long tokenAcknowledged = hybridSpoolingDelegate.getWriteToken(0);
+                        if (serializedPartitionedPages.containsKey(0) && serializedPartitionedPages.get(0).size() == 0) {
+                            serializedPartitionedPages.remove(0);
+                        }
+                        for (int count = 0; count < (tokenAcknowledged - tokenRemoved) && serializedPartitionedPages.containsKey(bufferId.getId()); count++) {
+                            SerializedPage serializedPage = serializedPartitionedPages.get(0).poll();
+                            bufferSize.getAndAdd(-serializedPage.getSizeInBytes());
+                            if (serializedPartitionedPages.get(0).size() == 0) {
+                                serializedPartitionedPages.remove(0);
+                            }
+                        }
+                        tokenRemoved = tokenAcknowledged;
+                    }
+                    else {
+                        hybridSpoolingDelegate.setNoMorePages();
+                        outputBuffer.setNoMorePages();
+                    }
+                }
+            }
+            if (outputBuffer instanceof PartitionedOutputBuffer) {
+                if (!clientAcknowledged) {
+                    long tokenAcknowledged = Math.min(outputBuffer.getTokenId(bufferId.getId(), token), hybridSpoolingDelegate.getWriteToken(bufferId.getId()));
+                    for (int count = 0; partitionedTokenIds.containsKey(bufferId.getId()) && count < (tokenAcknowledged - partitionedTokenIds.get(bufferId.getId())); count++) {
+                        SerializedPage serializedPage = serializedPartitionedPages.get(bufferId.getId()).poll();
+                        bufferSize.getAndAdd(-serializedPage.getSizeInBytes());
+                    }
+                    partitionedTokenIds.put(bufferId.getId(), tokenAcknowledged);
+                }
+                if (noMorePages) {
+                    if (serializedPartitionedPages .size() != 0) {
+                        long tokenAcknowledged = hybridSpoolingDelegate.getWriteToken(bufferId.getId());
+                        if (serializedPartitionedPages.get(bufferId.getId()).size() == 0) {
+                            serializedPartitionedPages.remove(bufferId.getId());
+                        }
+                        for (int count = 0; partitionedTokenIds.containsKey(bufferId.getId()) && count < (tokenAcknowledged - partitionedTokenIds.get(bufferId.getId())); count++) {
+                            SerializedPage serializedPage = serializedPartitionedPages.get(bufferId.getId()).poll();
+                            bufferSize.getAndAdd(-serializedPage.getSizeInBytes());
+                            if (serializedPartitionedPages.get(bufferId.getId()).size() == 0) {
+                                serializedPartitionedPages.remove(bufferId.getId());
+                            }
+                        }
+                        partitionedTokenIds.put(bufferId.getId(), tokenAcknowledged);
+                    }
+                }
+                else {
+                    hybridSpoolingDelegate.setNoMorePages();
+                    outputBuffer.setNoMorePages();
+                }
+            }
         }
         outputBuffer.acknowledge(bufferId, token);
     }
@@ -330,6 +436,14 @@ public class LazyOutputBuffer
             checkState(delegate != null, "Buffer has not been initialized");
             outputBuffer = delegate;
         }
+        if (hybridSpoolingDelegate != null && isTaskAsyncParallelWriteEnabled && delegate != null && !(delegate instanceof  BroadcastOutputBuffer)) {
+            if (!serializedPartitionedPages.containsKey(0)) {
+                serializedPartitionedPages.put(0, new ConcurrentLinkedQueue<>());
+            }
+            serializedPartitionedPages.get(0).addAll(pages);
+            pages.stream().forEach(serializedPage -> bufferSize.addAndGet(serializedPage.getSizeInBytes()));
+            hybridSpoolingDelegate.enqueue(pages, origin);
+        }
         outputBuffer.enqueue(pages, origin);
     }
 
@@ -340,6 +454,14 @@ public class LazyOutputBuffer
         synchronized (this) {
             checkState(delegate != null, "Buffer has not been initialized");
             outputBuffer = delegate;
+        }
+        if (hybridSpoolingDelegate != null && isTaskAsyncParallelWriteEnabled && delegate != null && !(delegate instanceof  BroadcastOutputBuffer)) {
+            if (!serializedPartitionedPages.containsKey(partition)) {
+                serializedPartitionedPages.put(partition, new ConcurrentLinkedQueue<>());
+            }
+            serializedPartitionedPages.get(partition).addAll(pages);
+            pages.stream().forEach(serializedPage -> bufferSize.addAndGet(serializedPage.getSizeInBytes()));
+            hybridSpoolingDelegate.enqueue(partition, pages, origin);
         }
         outputBuffer.enqueue(partition, pages, origin);
     }
@@ -352,10 +474,18 @@ public class LazyOutputBuffer
             checkState(delegate != null, "Buffer has not been initialized");
             outputBuffer = delegate;
         }
-        if (hybridSpoolingDelegate != null) {
-            hybridSpoolingDelegate.setNoMorePages();
+        if (hybridSpoolingDelegate != null && isTaskAsyncParallelWriteEnabled && delegate != null && !(delegate instanceof  BroadcastOutputBuffer)) {
+            noMorePages = true;
         }
-        outputBuffer.setNoMorePages();
+        else {
+            outputBuffer.setNoMorePages();
+        }
+    }
+
+    @Override
+    public void setSession(Session session)
+    {
+        isTaskAsyncParallelWriteEnabled = (getRetryPolicy(session) == RetryPolicy.TASK_ASYNC && isTaskAsyncParallelWriteEnabled(session));
     }
 
     @Override
@@ -529,6 +659,12 @@ public class LazyOutputBuffer
     public OutputBuffer getSpoolingDelegate()
     {
         return hybridSpoolingDelegate;
+    }
+
+    @Override
+    public OutputBuffer getDelegate()
+    {
+        return delegate;
     }
 
     @Override

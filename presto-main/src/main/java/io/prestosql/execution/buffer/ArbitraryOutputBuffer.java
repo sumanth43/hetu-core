@@ -39,10 +39,12 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -85,6 +87,7 @@ public class ArbitraryOutputBuffer
     private OutputBuffers outputBuffers = createInitialEmptyOutputBuffers(ARBITRARY);
 
     private final MasterBuffer masterBuffer;
+    private Map<Integer, AsyncMasterBuffer> asyncMasterBuffers = new HashMap<>();
 
     @GuardedBy("this")
     private final ConcurrentMap<OutputBufferId, ClientBuffer> buffers = new ConcurrentHashMap<>();
@@ -97,12 +100,25 @@ public class ArbitraryOutputBuffer
 
     private final AtomicLong totalPagesAdded = new AtomicLong();
     private final AtomicLong totalRowsAdded = new AtomicLong();
+    private final boolean isTaskAsyncParallelWrite;
+    private Map<String, Long> masterBuffersInfo = new HashMap<>();
+    private long pageCounter;
 
     public ArbitraryOutputBuffer(
             OutputBufferStateMachine state,
             DataSize maxBufferSize,
             Supplier<LocalMemoryContext> systemMemoryContextSupplier,
             Executor notificationExecutor)
+    {
+        this (state, maxBufferSize, systemMemoryContextSupplier, notificationExecutor, false);
+    }
+
+    public ArbitraryOutputBuffer(
+            OutputBufferStateMachine state,
+            DataSize maxBufferSize,
+            Supplier<LocalMemoryContext> systemMemoryContextSupplier,
+            Executor notificationExecutor,
+            boolean isTaskAsyncParallelWrite)
     {
         this.stateMachine = requireNonNull(state, "state is null");
         requireNonNull(maxBufferSize, "maxBufferSize is null");
@@ -112,6 +128,7 @@ public class ArbitraryOutputBuffer
                 requireNonNull(systemMemoryContextSupplier, "systemMemoryContextSupplier is null"),
                 requireNonNull(notificationExecutor, "notificationExecutor is null"));
         this.masterBuffer = new MasterBuffer();
+        this.isTaskAsyncParallelWrite = isTaskAsyncParallelWrite;
     }
 
     @Override
@@ -153,7 +170,15 @@ public class ArbitraryOutputBuffer
         @SuppressWarnings("FieldAccessNotGuarded")
         Collection<ClientBuffer> clientBuffers = this.buffers.values();
 
-        int totalBufferedPages = masterBuffer.getBufferedPages();
+        int totalBufferedPages = 0;
+        if (isTaskAsyncParallelWrite) {
+            for (AsyncMasterBuffer localAsyncMasterBuffers : asyncMasterBuffers.values()) {
+                totalBufferedPages = localAsyncMasterBuffers.getBufferedPages();
+            }
+        }
+        else {
+            totalBufferedPages = masterBuffer.getBufferedPages();
+        }
         ImmutableList.Builder<BufferInfo> infos = ImmutableList.builder();
         for (ClientBuffer buffer : clientBuffers) {
             BufferInfo bufferInfo = buffer.getInfo();
@@ -266,15 +291,31 @@ public class ArbitraryOutputBuffer
                 .map(pageSplit -> new SerializedPageReference(pageSplit, 1, () -> memoryManager.updateMemoryUsage(-pageSplit.getRetainedSizeInBytes())))
                 .collect(toImmutableList());
 
-        // add pages to the buffer
-        masterBuffer.addPages(serializedPageReferences, targetClients);
+        if (isTaskAsyncParallelWrite) {
+            enqueuePagesRoundRobin(serializedPageReferences, targetClients);
+        }
+        else {
+            // add pages to the buffer
+            masterBuffer.addPages(serializedPageReferences, targetClients);
+        }
 
         // process any pending reads from the client buffers
-        for (ClientBuffer clientBuffer : safeGetBuffersSnapshot()) {
-            if (masterBuffer.isEmpty()) {
-                break;
+        if (isTaskAsyncParallelWrite) {
+            for (ClientBuffer clientBuffer : safeGetBuffersSnapshot()) {
+                if (masterBuffer.isEmpty()) {
+                    break;
+                }
+                AsyncMasterBuffer localAsyncMasterBuffer = asyncMasterBuffers.get(clientBuffer.getInfo().getBufferId().getId());
+                clientBuffer.loadPagesIfNecessary(localAsyncMasterBuffer);
             }
-            clientBuffer.loadPagesIfNecessary(masterBuffer);
+        }
+        else {
+            for (ClientBuffer clientBuffer : safeGetBuffersSnapshot()) {
+                if (masterBuffer.isEmpty()) {
+                    break;
+                }
+                clientBuffer.loadPagesIfNecessary(masterBuffer);
+            }
         }
 
         if (targetClients != null && stateMachine.getState().canAddBuffers()) {
@@ -283,6 +324,21 @@ public class ArbitraryOutputBuffer
             serializedPageReferences.forEach(SerializedPageReference::addReference);
             markersForNewBuffers.addAll(serializedPageReferences);
         }
+    }
+
+    @Override
+    public long getTokenId(int bufferId, long token)
+    {
+        return masterBuffersInfo.get(bufferId + "-" + token);
+    }
+
+    @Override
+    public boolean checkIfAcknowledged(int bufferId, long token)
+    {
+        if (masterBuffersInfo.containsKey(bufferId + "-" + token)) {
+            return false;
+        }
+        return true;
     }
 
     @Override
@@ -299,6 +355,11 @@ public class ArbitraryOutputBuffer
         requireNonNull(bufferId, "bufferId is null");
         checkArgument(maxSize.toBytes() > 0, "maxSize must be at least 1 byte");
 
+        if (isTaskAsyncParallelWrite) {
+            AsyncMasterBuffer localAsyncMasterBuffer = asyncMasterBuffers.get(bufferId);
+            return getBuffer(bufferId).getPages(startingSequenceId, maxSize, Optional.of(localAsyncMasterBuffer));
+        }
+
         return getBuffer(bufferId).getPages(startingSequenceId, maxSize, Optional.of(masterBuffer));
     }
 
@@ -309,6 +370,10 @@ public class ArbitraryOutputBuffer
         requireNonNull(bufferId, "bufferId is null");
 
         getBuffer(bufferId).acknowledgePages(sequenceId);
+
+        if (isTaskAsyncParallelWrite) {
+            masterBuffersInfo.remove(bufferId + "-" + sequenceId);
+        }
     }
 
     @Override
@@ -345,11 +410,22 @@ public class ArbitraryOutputBuffer
         stateMachine.compareAndSet(NO_MORE_BUFFERS, FLUSHING);
         memoryManager.setNoBlockOnFull();
 
-        masterBuffer.setNoMorePages();
+        if (isTaskAsyncParallelWrite) {
+            asyncMasterBuffers.values().forEach(buffer -> buffer.setNoMorePages());
+        }
+        else {
+            masterBuffer.setNoMorePages();
+        }
 
         // process any pending reads from the client buffers
         for (ClientBuffer clientBuffer : safeGetBuffersSnapshot()) {
-            clientBuffer.loadPagesIfNecessary(masterBuffer);
+            if (isTaskAsyncParallelWrite) {
+                AsyncMasterBuffer localAsyncMasterBuffer =  asyncMasterBuffers.get(clientBuffer.getInfo().getBufferId().getId());
+                clientBuffer.loadPagesIfNecessary(localAsyncMasterBuffer);
+            }
+            else {
+                clientBuffer.loadPagesIfNecessary(masterBuffer);
+            }
         }
 
         checkFlushComplete();
@@ -370,7 +446,12 @@ public class ArbitraryOutputBuffer
         if (stateMachine.setIf(FINISHED, oldState -> !oldState.isTerminal())) {
             noMoreBuffers();
 
-            masterBuffer.destroy();
+            if (isTaskAsyncParallelWrite) {
+                asyncMasterBuffers.values().forEach(buffer -> buffer.destroy());
+            }
+            else {
+                masterBuffer.destroy();
+            }
 
             safeGetBuffersSnapshot().forEach(ClientBuffer::destroy);
 
@@ -402,6 +483,17 @@ public class ArbitraryOutputBuffer
         memoryManager.close();
     }
 
+
+    private synchronized void enqueuePagesRoundRobin(List<SerializedPageReference> serializedPageReferences, Collection<ClientBuffer> targetClients)
+    {
+        for (SerializedPageReference serializedPageReference : serializedPageReferences) {
+            long pageBuffer = pageCounter % buffers.size();
+            AsyncMasterBuffer localAsyncMasterBuffer = asyncMasterBuffers.get(pageBuffer);
+            localAsyncMasterBuffer.addPages(ImmutableList.of(serializedPageReference), targetClients);
+            masterBuffersInfo.put(pageBuffer + "-" + localAsyncMasterBuffer.getToken(), pageCounter++);
+        }
+    }
+
     private synchronized ClientBuffer getBuffer(OutputBufferId id)
     {
         ClientBuffer buffer = buffers.get(id);
@@ -424,7 +516,17 @@ public class ArbitraryOutputBuffer
             // add pending markers
             if (!markersForNewBuffers.isEmpty()) {
                 markersForNewBuffers.forEach(SerializedPageReference::addReference);
-                masterBuffer.insertMarkers(markersForNewBuffers, buffer);
+                if (isTaskAsyncParallelWrite) {
+                    AsyncMasterBuffer localAsyncMasterBuffer = asyncMasterBuffers.get(id.getId());
+                    if (localAsyncMasterBuffer == null) {
+                        localAsyncMasterBuffer = new AsyncMasterBuffer(id.getId());
+                        asyncMasterBuffers.put(id.getId(), localAsyncMasterBuffer);
+                    }
+                    localAsyncMasterBuffer.insertMarkers(markersForNewBuffers, buffer);
+                }
+                else {
+                    masterBuffer.insertMarkers(markersForNewBuffers, buffer);
+                }
             }
 
             // buffer may have finished immediately before calling this method
@@ -476,6 +578,31 @@ public class ArbitraryOutputBuffer
             if (safeGetBuffersSnapshot().stream().allMatch(ClientBuffer::isDestroyed)) {
                 destroy();
             }
+        }
+    }
+
+    @ThreadSafe
+    private class AsyncMasterBuffer
+            extends MasterBuffer
+    {
+        @GuardedBy("this")
+        private final int id;
+        private final AtomicLong token = new AtomicLong();
+
+        public AsyncMasterBuffer(int id)
+        {
+            super();
+            this.id = id;
+        }
+
+        public int getId()
+        {
+            return id;
+        }
+
+        public long getToken()
+        {
+            return token.getAndAdd(1);
         }
     }
 
@@ -654,6 +781,11 @@ public class ArbitraryOutputBuffer
         this.snapshotState = SystemSessionProperties.isSnapshotEnabled(taskContext.getSession())
                 ? MultiInputSnapshotState.forTaskComponent(this, taskContext, snapshotId -> SnapshotStateId.forTaskComponent(snapshotId, taskContext, "OutputBuffer"))
                 : null;
+        if (isTaskAsyncParallelWrite && asyncMasterBuffers.size() == 0) {
+            for (OutputBufferId outputBufferId : buffers.keySet()) {
+                asyncMasterBuffers.put(outputBufferId.getId(), new AsyncMasterBuffer(outputBufferId.getId()));
+            }
+        }
     }
 
     @Override

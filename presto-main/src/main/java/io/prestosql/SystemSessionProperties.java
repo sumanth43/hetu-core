@@ -204,6 +204,7 @@ public final class SystemSessionProperties
     public static final String FAULT_TOLERANT_EXECUTION_PARTITION_COUNT = "fault_tolerant_execution_partition_count";
     public static final String FAULT_TOLERANT_EXECUTION_TASK_MEMORY_GROWTH_FACTOR = "fault_tolerant_execution_task_memory_growth_factor";
     public static final String FAULT_TOLERANT_EXECUTION_TASK_MEMORY_ESTIMATION_QUANTILE = "fault_tolerant_execution_task_memory_estimation_quantile";
+    public static final String TASK_ASYNC_PARALLEL_WRITE_ENABLED = "task_async_parallel_write_enabled";
 
     public static final String ADAPTIVE_PARTIAL_AGGREGATION_ENABLED = "adaptive_partial_aggregation_enabled";
     public static final String ADAPTIVE_PARTIAL_AGGREGATION_MIN_ROWS = "adaptive_partial_aggregation_min_rows";
@@ -1087,6 +1088,10 @@ public final class SystemSessionProperties
                         CTE_MATERIALIZATION_SCHEMA_NAME,
                         "Name of the table schema to store cached result data",
                         hetuConfig.getCachingSchemaName(),
+                        false),
+                booleanProperty(TASK_ASYNC_PARALLEL_WRITE_ENABLED,
+                        "Parallel Writes to client buffer and spool when retry policy is TASK_ASYNC",
+                        queryManagerConfig.isTaskAsyncParallelWriteEnabled(),
                         false));
     }
 
@@ -1926,5 +1931,10 @@ public final class SystemSessionProperties
     public static DataSize getCteResultCacheThresholdSize(Session session)
     {
         return session.getSystemProperty(CTE_MATERIALIZATION_THRESHOLD_SIZE, DataSize.class);
+    }
+
+    public static boolean isTaskAsyncParallelWriteEnabled(Session session)
+    {
+        return session.getSystemProperty(TASK_ASYNC_PARALLEL_WRITE_ENABLED, Boolean.class);
     }
 }
